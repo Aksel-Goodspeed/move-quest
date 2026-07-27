@@ -24,6 +24,7 @@ import { ProfileSetup } from './components/ProfileSetup'
 import { ResultScreen } from './components/ResultScreen'
 import { SetPasswordScreen } from './components/SetPasswordScreen'
 import { SettingsScreen } from './components/SettingsScreen'
+import { clearCache } from './lib/cache'
 import { preparePhotoForUpload } from './lib/preparePhoto'
 import { supabase } from './lib/supabase'
 import { applyTheme, loadSettings, saveSettings, type Settings } from './settings'
@@ -385,6 +386,7 @@ export default function App() {
   async function handleSignOut() {
     await signOut()
     clearNav()
+    clearCache()
     setUser(null)
     setScore(null)
     setViewingUserId(null)

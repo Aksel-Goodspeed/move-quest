@@ -1,4 +1,4 @@
-import { Send, SmilePlus, X } from 'lucide-react'
+import { Send, SmilePlus, Trash2, X } from 'lucide-react'
 import {
   useEffect,
   useRef,
@@ -7,7 +7,7 @@ import {
   type KeyboardEvent,
 } from 'react'
 import { createPortal } from 'react-dom'
-import { commentOnPost, reactToPost } from '../api'
+import { commentOnPost, deleteOwnPost, fetchReactors, reactToPost } from '../api'
 import { iconForChallenge } from '../challengeIcon'
 import { cue } from '../feedback'
 import { timeAgo } from '../labels'
@@ -29,6 +29,8 @@ interface Props {
     attemptId: string,
     patch: { reactions?: ReactionSummary[]; comments?: FeedComment[] },
   ) => void
+  /** Called after the owner deletes this post, so the parent can drop it. */
+  onDeleted?: (attemptId: string) => void
 }
 
 /** How many recent comments to show before the list is expanded. */
@@ -38,7 +40,13 @@ const COMMENT_PREVIEW = 2
  * A single feed post with reactions + comments. Shared by the Home feed
  * (inline list) and the profile page (inside a floating post modal).
  */
-export function PostCard({ item, userId, onOpenProfile, onEngagementChange }: Props) {
+export function PostCard({
+  item,
+  userId,
+  onOpenProfile,
+  onEngagementChange,
+  onDeleted,
+}: Props) {
   const isMine = item.userId === userId
   const [reactions, setReactions] = useState<ReactionSummary[]>(item.reactions)
   const [comments, setComments] = useState<FeedComment[]>(item.comments)
@@ -49,7 +57,16 @@ export function PostCard({ item, userId, onOpenProfile, onEngagementChange }: Pr
   const [reactError, setReactError] = useState<string | null>(null)
   const [commentError, setCommentError] = useState<string | null>(null)
   const [lightbox, setLightbox] = useState(false)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [reactorsEmoji, setReactorsEmoji] = useState<string | null>(null)
+  const [reactorList, setReactorList] = useState<
+    { userId: string; displayName: string }[] | null
+  >(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  const pressTimer = useRef<number | null>(null)
+  const longPressed = useRef(false)
   const TaskIcon = iconForChallenge({
     title: item.challengeTitle,
     prompt: item.challengePrompt,
@@ -137,6 +154,51 @@ export function PostCard({ item, userId, onOpenProfile, onEngagementChange }: Pr
     }
   }
 
+  async function openReactors(emoji: string) {
+    setReactorsEmoji(emoji)
+    setReactorList(null)
+    try {
+      const people = await fetchReactors(item.attemptId, emoji)
+      setReactorList(people)
+    } catch {
+      setReactorList([])
+    }
+  }
+
+  function startPress(emoji: string) {
+    longPressed.current = false
+    cancelPress()
+    pressTimer.current = window.setTimeout(() => {
+      longPressed.current = true
+      cue.tick()
+      void openReactors(emoji)
+    }, 450)
+  }
+
+  function cancelPress() {
+    if (pressTimer.current !== null) {
+      clearTimeout(pressTimer.current)
+      pressTimer.current = null
+    }
+  }
+
+  async function confirmDelete() {
+    if (deleting) return
+    setDeleting(true)
+    setDeleteError(null)
+    try {
+      await deleteOwnPost(item.attemptId)
+      cue.tick()
+      setConfirmingDelete(false)
+      onDeleted?.(item.attemptId)
+    } catch (err) {
+      cue.error()
+      setDeleteError(err instanceof Error ? err.message : 'Could not delete post')
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   const canOpenProfile = Boolean(onOpenProfile)
   const hasHiddenComments = comments.length > COMMENT_PREVIEW
   const visibleComments =
@@ -181,6 +243,19 @@ export function PostCard({ item, userId, onOpenProfile, onEngagementChange }: Pr
             {timeAgo(item.awardedAt)}
           </span>
         </div>
+        {isMine ? (
+          <button
+            type="button"
+            className="feed-delete"
+            onClick={() => {
+              setDeleteError(null)
+              setConfirmingDelete(true)
+            }}
+            aria-label="Delete this post"
+          >
+            <Trash2 size={18} strokeWidth={2} />
+          </button>
+        ) : null}
       </header>
 
       {item.photoUrl ? (
@@ -226,17 +301,38 @@ export function PostCard({ item, userId, onOpenProfile, onEngagementChange }: Pr
         <div className="reaction-bar">
           {reactions.map((r) =>
             isMine ? (
-              <span key={r.emoji} className={`reaction static ${r.mine ? 'mine' : ''}`}>
+              <button
+                key={r.emoji}
+                type="button"
+                className={`reaction static ${r.mine ? 'mine' : ''}`}
+                onPointerDown={() => startPress(r.emoji)}
+                onPointerUp={cancelPress}
+                onPointerLeave={cancelPress}
+                onPointerCancel={cancelPress}
+                onClick={() => openReactors(r.emoji)}
+                aria-label={`See who reacted ${r.emoji}`}
+              >
                 <span aria-hidden="true">{r.emoji}</span>
                 <span className="reaction-count">{r.count}</span>
-              </span>
+              </button>
             ) : (
               <button
                 key={r.emoji}
                 type="button"
                 className={`reaction ${r.mine ? 'mine' : ''}`}
                 aria-pressed={r.mine}
-                onClick={() => void react(r.emoji)}
+                onPointerDown={() => startPress(r.emoji)}
+                onPointerUp={cancelPress}
+                onPointerLeave={cancelPress}
+                onPointerCancel={cancelPress}
+                onClick={() => {
+                  // Suppress the toggle if this was a long-press.
+                  if (longPressed.current) {
+                    longPressed.current = false
+                    return
+                  }
+                  void react(r.emoji)
+                }}
               >
                 <span aria-hidden="true">{r.emoji}</span>
                 <span className="reaction-count">{r.count}</span>
@@ -334,6 +430,92 @@ export function PostCard({ item, userId, onOpenProfile, onEngagementChange }: Pr
           ) : null}
         </div>
       </div>
+
+      {confirmingDelete
+        ? createPortal(
+            <div
+              className="confirm-overlay"
+              onClick={() => (deleting ? null : setConfirmingDelete(false))}
+            >
+              <div
+                className="confirm-dialog"
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="confirm-title"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h2 id="confirm-title" className="confirm-title">
+                  Delete this post?
+                </h2>
+                <p className="confirm-text">
+                  This removes your “{item.challengeTitle}” post and subtracts the
+                  {` ${item.pointsAwarded} `}
+                  points it earned. This can’t be undone.
+                </p>
+                {deleteError ? (
+                  <p className="banner error" role="alert">
+                    {deleteError}
+                  </p>
+                ) : null}
+                <div className="confirm-actions">
+                  <button
+                    type="button"
+                    className="secondary-btn"
+                    onClick={() => setConfirmingDelete(false)}
+                    disabled={deleting}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="danger-btn"
+                    onClick={() => void confirmDelete()}
+                    disabled={deleting}
+                  >
+                    {deleting ? 'Deleting…' : 'Delete'}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+
+      {reactorsEmoji
+        ? createPortal(
+            <div className="reactors-overlay" onClick={() => setReactorsEmoji(null)}>
+              <div
+                className="reactors-sheet"
+                role="dialog"
+                aria-label={`People who reacted ${reactorsEmoji}`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <p className="reactors-title">
+                  <span aria-hidden="true">{reactorsEmoji}</span>
+                  <span>Reacted</span>
+                </p>
+                {reactorList === null ? (
+                  <p className="reactors-empty">Loading…</p>
+                ) : reactorList.length === 0 ? (
+                  <p className="reactors-empty">No one yet</p>
+                ) : (
+                  <ul className="reactors-list">
+                    {reactorList.map((person) => (
+                      <li key={person.userId}>
+                        <Avatar name={person.displayName} size={30} />
+                        <span className="reactors-name">
+                          {person.displayName}
+                          {person.userId === userId ? ' · you' : ''}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </article>
   )
 }

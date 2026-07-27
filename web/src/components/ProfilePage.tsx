@@ -2,6 +2,7 @@ import { ChevronLeft, Settings, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { fetchUserPosts, fetchUserProfile } from '../api'
+import { cacheKeys, getCached } from '../lib/cache'
 import type { FeedItem, UserProfile } from '../types'
 import { Avatar } from './Avatar'
 import { PostCard } from './PostCard'
@@ -21,17 +22,33 @@ export function ProfilePage({
   onOpenSettings,
 }: Props) {
   const isMe = profileUserId === currentUserId
-  const [profile, setProfile] = useState<UserProfile | null>(null)
-  const [posts, setPosts] = useState<FeedItem[]>([])
-  const [loading, setLoading] = useState(true)
+  const [profile, setProfile] = useState<UserProfile | null>(
+    () => getCached<UserProfile>(cacheKeys.profile(profileUserId)) ?? null,
+  )
+  const [posts, setPosts] = useState<FeedItem[]>(
+    () => getCached<FeedItem[]>(cacheKeys.posts(profileUserId)) ?? [],
+  )
+  const [loading, setLoading] = useState(
+    () => getCached<UserProfile>(cacheKeys.profile(profileUserId)) === undefined,
+  )
   const [error, setError] = useState<string | null>(null)
   const [openId, setOpenId] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
     setError(null)
     setOpenId(null)
+    // Show cached data instantly (stale-while-revalidate); otherwise skeleton.
+    const cachedProfile = getCached<UserProfile>(cacheKeys.profile(profileUserId))
+    if (cachedProfile) {
+      setProfile(cachedProfile)
+      setPosts(getCached<FeedItem[]>(cacheKeys.posts(profileUserId)) ?? [])
+      setLoading(false)
+    } else {
+      setProfile(null)
+      setPosts([])
+      setLoading(true)
+    }
     async function load() {
       try {
         const [prof, userPosts] = await Promise.all([
@@ -53,6 +70,18 @@ export function ProfilePage({
       cancelled = true
     }
   }, [profileUserId])
+
+  async function handleDeleted(attemptId: string) {
+    setPosts((cur) => cur.filter((p) => p.attemptId !== attemptId))
+    setOpenId(null)
+    // Refresh header stats (uploads + points dropped).
+    try {
+      const prof = await fetchUserProfile(profileUserId)
+      setProfile(prof)
+    } catch {
+      // Non-fatal; the grid already reflects the removal.
+    }
+  }
 
   const openPost = posts.find((p) => p.attemptId === openId) ?? null
   const name = profile?.displayName ?? 'Player'
@@ -182,6 +211,7 @@ export function ProfilePage({
                       cur.map((p) => (p.attemptId === attemptId ? { ...p, ...patch } : p)),
                     )
                   }
+                  onDeleted={(attemptId) => void handleDeleted(attemptId)}
                 />
               </div>
             </div>,

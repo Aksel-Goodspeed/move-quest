@@ -1,3 +1,4 @@
+import { cacheKeys, setCached } from './lib/cache'
 import { functionsUrl, supabase } from './lib/supabase'
 import type {
   AttemptSummary,
@@ -278,7 +279,9 @@ function mapLeaderboardRows(data: unknown): LeaderboardEntry[] {
 export async function fetchLeaderboard(): Promise<LeaderboardEntry[]> {
   const { data, error } = await supabase.rpc('get_leaderboard', { p_limit: 100 })
   if (error) throw new Error(error.message)
-  return mapLeaderboardRows(data)
+  const entries = mapLeaderboardRows(data)
+  setCached(cacheKeys.board('all'), entries)
+  return entries
 }
 
 /** Weekly leaderboard — challenge points earned since Monday. */
@@ -287,7 +290,9 @@ export async function fetchWeeklyLeaderboard(): Promise<LeaderboardEntry[]> {
     p_limit: 100,
   })
   if (error) throw new Error(error.message)
-  return mapLeaderboardRows(data)
+  const entries = mapLeaderboardRows(data)
+  setCached(cacheKeys.board('week'), entries)
+  return entries
 }
 
 interface FeedRow {
@@ -310,20 +315,47 @@ interface FeedRow {
   }> | null
 }
 
+// Signed-URL cache. createSignedUrls mints a fresh token every call, so
+// without this the <img src> changes on every fetch and the browser can never
+// reuse a cached image. Caching the URL per path (with a long TTL) keeps the
+// src stable across navigations, so images are downloaded once.
+const SIGN_TTL_SECONDS = 3600
+const SIGN_REFRESH_BUFFER_MS = 5 * 60 * 1000
+const signedUrlCache = new Map<string, { url: string; expires: number }>()
+
+async function signPhotoPaths(paths: string[]): Promise<Map<string, string>> {
+  const now = Date.now()
+  const result = new Map<string, string>()
+  const missing: string[] = []
+  for (const path of paths) {
+    const hit = signedUrlCache.get(path)
+    if (hit && hit.expires - SIGN_REFRESH_BUFFER_MS > now) {
+      result.set(path, hit.url)
+    } else {
+      missing.push(path)
+    }
+  }
+  if (missing.length > 0) {
+    const { data: signed } = await supabase.storage
+      .from('challenge-photos')
+      .createSignedUrls(missing, SIGN_TTL_SECONDS)
+    for (const s of signed ?? []) {
+      if (s.path && s.signedUrl) {
+        signedUrlCache.set(s.path, {
+          url: s.signedUrl,
+          expires: now + SIGN_TTL_SECONDS * 1000,
+        })
+        result.set(s.path, s.signedUrl)
+      }
+    }
+  }
+  return result
+}
+
 /** Sign photo paths and shape feed rows (from get_feed / get_user_posts) into FeedItems. */
 async function hydrateFeedRows(rows: FeedRow[]): Promise<FeedItem[]> {
   const paths = rows.map((r) => r.photo_path).filter(Boolean)
-  let urlMap = new Map<string, string>()
-  if (paths.length > 0) {
-    const { data: signed } = await supabase.storage
-      .from('challenge-photos')
-      .createSignedUrls(paths, 300)
-    urlMap = new Map(
-      (signed ?? [])
-        .filter((s) => s.path && s.signedUrl)
-        .map((s) => [s.path as string, s.signedUrl as string]),
-    )
-  }
+  const urlMap = paths.length > 0 ? await signPhotoPaths(paths) : new Map<string, string>()
 
   return rows.map((row) => ({
     attemptId: row.attempt_id,
@@ -362,7 +394,9 @@ export async function fetchFeed(options?: {
     p_before_id: options?.beforeId ?? null,
   })
   if (error) throw new Error(error.message)
-  return hydrateFeedRows((data ?? []) as FeedRow[])
+  const items = await hydrateFeedRows((data ?? []) as FeedRow[])
+  if (!options?.beforeAwardedAt) setCached(cacheKeys.feed, items)
+  return items
 }
 
 /** All accepted posts by one user, newest first (their profile gallery). */
@@ -377,7 +411,9 @@ export async function fetchUserPosts(
     p_before_id: options?.beforeId ?? null,
   })
   if (error) throw new Error(error.message)
-  return hydrateFeedRows((data ?? []) as FeedRow[])
+  const items = await hydrateFeedRows((data ?? []) as FeedRow[])
+  if (!options?.beforeAwardedAt) setCached(cacheKeys.posts(userId), items)
+  return items
 }
 
 /** Header stats for a member's profile page (own or another user's). */
@@ -396,13 +432,15 @@ export async function fetchUserProfile(userId: string): Promise<UserProfile> {
       }
     | undefined
   if (!row) throw new Error('Profile not found')
-  return {
+  const profile: UserProfile = {
     userId: row.user_id,
     displayName: row.display_name,
     uploads: Number(row.uploads),
     weekPoints: Number(row.week_points),
     allTimePoints: Number(row.all_time_points),
   }
+  setCached(cacheKeys.profile(userId), profile)
+  return profile
 }
 
 export async function reactToPost(
@@ -465,6 +503,34 @@ export async function commentOnPost(
     avatarUrl: row.avatar_url,
     body: row.body,
     createdAt: row.created_at,
+  }
+}
+
+/** Members who reacted to a post with a specific emoji (oldest first). */
+export async function fetchReactors(
+  attemptId: string,
+  emoji: string,
+): Promise<{ userId: string; displayName: string }[]> {
+  const { data, error } = await supabase.rpc('get_post_reactors', {
+    p_attempt_id: attemptId,
+    p_emoji: emoji,
+  })
+  if (error) throw new Error(error.message)
+  return ((data ?? []) as Array<{ user_id: string; display_name: string }>).map(
+    (row) => ({ userId: row.user_id, displayName: row.display_name }),
+  )
+}
+
+/** Delete one of your own posts. Removes it and subtracts its earned points. */
+export async function deleteOwnPost(attemptId: string): Promise<void> {
+  const { error } = await supabase.rpc('delete_own_post', {
+    p_attempt_id: attemptId,
+  })
+  if (error) {
+    if (error.message.includes('NOT_OWNER')) {
+      throw new Error('You can only delete your own posts')
+    }
+    throw new Error(error.message)
   }
 }
 

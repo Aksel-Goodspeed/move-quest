@@ -1,6 +1,7 @@
 import { Trophy } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { fetchFeed, subscribeAcceptedAttempts } from '../api'
+import { cacheKeys, getCached } from '../lib/cache'
 import type { FeedItem } from '../types'
 import { Logo } from './Logo'
 import { PostCard } from './PostCard'
@@ -13,8 +14,9 @@ interface Props {
 }
 
 export function FeedScreen({ userId, onOpenLeaderboard, onOpenProfile }: Props) {
-  const [items, setItems] = useState<FeedItem[]>([])
-  const [loading, setLoading] = useState(true)
+  const cachedFeed = getCached<FeedItem[]>(cacheKeys.feed)
+  const [items, setItems] = useState<FeedItem[]>(cachedFeed ?? [])
+  const [loading, setLoading] = useState(!cachedFeed)
   const [error, setError] = useState<string | null>(null)
   const [barHidden, setBarHidden] = useState(false)
 
@@ -61,7 +63,7 @@ export function FeedScreen({ userId, onOpenLeaderboard, onOpenProfile }: Props) 
   }, [])
 
   return (
-    <section className="screen feed-screen" aria-labelledby="feed-title">
+    <section className="screen feed-screen" aria-label="Home feed">
       <header className={`topbar feed-topbar ${barHidden ? 'hidden' : ''}`}>
         <Logo height={28} />
         <button
@@ -73,9 +75,6 @@ export function FeedScreen({ userId, onOpenLeaderboard, onOpenProfile }: Props) 
           <Trophy size={20} strokeWidth={2} />
         </button>
       </header>
-
-      <h1 id="feed-title">Home</h1>
-      <p className="lede">Every move the team makes, as it happens.</p>
 
       {error ? (
         <p className="banner error" role="alert">
@@ -97,7 +96,14 @@ export function FeedScreen({ userId, onOpenLeaderboard, onOpenProfile }: Props) 
         <ul className="feed-list">
           {items.map((item, index) => (
             <li key={item.attemptId} style={{ animationDelay: `${Math.min(index, 8) * 50}ms` }}>
-              <PostCard item={item} userId={userId} onOpenProfile={onOpenProfile} />
+              <PostCard
+                item={item}
+                userId={userId}
+                onOpenProfile={onOpenProfile}
+                onDeleted={(attemptId) =>
+                  setItems((cur) => cur.filter((i) => i.attemptId !== attemptId))
+                }
+              />
             </li>
           ))}
         </ul>

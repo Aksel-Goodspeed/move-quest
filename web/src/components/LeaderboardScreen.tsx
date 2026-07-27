@@ -2,6 +2,7 @@ import { ChevronLeft, Clock } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { fetchLeaderboard, fetchWeeklyLeaderboard, subscribeScores } from '../api'
 import { cue } from '../feedback'
+import { cacheKeys, getCached } from '../lib/cache'
 import type { LeaderboardEntry } from '../types'
 import { Logo } from './Logo'
 import { Skeleton, SkeletonBoardRow } from './Skeleton'
@@ -34,8 +35,12 @@ const MEDAL = ['rank-gold', 'rank-silver', 'rank-bronze']
 
 export function LeaderboardScreen({ userId, onBack }: Props) {
   const [tab, setTab] = useState<BoardTab>('week')
-  const [entries, setEntries] = useState<LeaderboardEntry[]>([])
-  const [loading, setLoading] = useState(true)
+  const [entries, setEntries] = useState<LeaderboardEntry[]>(
+    () => getCached<LeaderboardEntry[]>(cacheKeys.board('week')) ?? [],
+  )
+  const [loading, setLoading] = useState(
+    () => getCached<LeaderboardEntry[]>(cacheKeys.board('week')) === undefined,
+  )
   const [error, setError] = useState<string | null>(null)
   const [resetMs, setResetMs] = useState(() => msUntilReset())
 
@@ -47,7 +52,15 @@ export function LeaderboardScreen({ userId, onBack }: Props) {
   useEffect(() => {
     let cancelled = false
     const fetcher = tab === 'week' ? fetchWeeklyLeaderboard : fetchLeaderboard
-    setLoading(true)
+    // Show cached rows for this tab instantly; otherwise skeleton.
+    const cached = getCached<LeaderboardEntry[]>(cacheKeys.board(tab))
+    if (cached) {
+      setEntries(cached)
+      setLoading(false)
+    } else {
+      setEntries([])
+      setLoading(true)
+    }
     async function load() {
       try {
         const data = await fetcher()
